@@ -15,7 +15,7 @@
  */
 
 def version() {
-	return "1.6.0 (20190212)\n© 2016–2019 Andreas Amann"
+	return "1.0.0 (20191108)\n© 2016–2019 Andreas Amann\n© 2019 Thomas Moore"
 }
 
 preferences {
@@ -27,17 +27,17 @@ preferences {
 		required: true, displayDuringSetup: true)
 	input("pollingInterval", "number", title:"Polling Interval (min)",
 		defaultValue:"5", range: "2..59", required: true, displayDuringSetup: true)
-	input(title: "", description: "Inverter Size (W)\n\nRated maximum power in Watts for each inverter\n\nUse '225' for M215 and '250' for M250", type: "paragraph", element: "paragraph", displayDuringSetup: true)
+	input(title:"", description:"Inverter Size (W)\n\nRated maximum power in Watts for each inverter\n\nUse '225' for M215 and '250' for M250", type: "paragraph", element: "paragraph")
 	input("confInverterSize", "number", title:"",
 		required: true, displayDuringSetup: true)
-	input(title: "", description: "Panel Size (W)\n\nRated maximum power in Watts for each panel\n\nThis can be different than the maximum inverter power above", type: "paragraph", element: "paragraph", displayDuringSetup: true)
+	input(title:"", description:"Panel Size (W)\n\nRated maximum power in Watts for each panel\n\nThis can be different than the maximum inverter power above", type: "paragraph", element: "paragraph")
 	input("confPanelSize", "number", title:"",
 		required: true, displayDuringSetup: true)
 	input(title:"", description: "Version: ${version()}", type: "paragraph", element: "paragraph")
 }
 
 metadata {
-	definition (name: "Enlighten Envoy (local)", namespace: "aamann", author: "Andreas Amann") {
+	definition (name: "Enlighten Envoy (local)", namespace: "tcm0116", author: "Thomas Moore") {
 		capability "Sensor"
 		capability "Power Meter"
 		capability "Energy Meter"
@@ -67,7 +67,7 @@ metadata {
 				state("power",
 					label: '${currentValue}W',
 					unit: "W",
-					icon: "https://raw.githubusercontent.com/ahndee/Envoy-ST/master/devicetypes/aamann/enlighten-envoy-local.src/Solar.png",
+					icon: "https://raw.githubusercontent.com/tcm0116/Envoy-ST/master/devicetypes/tcm0116/enlighten-envoy-local.src/Solar.png",
 					backgroundColors: [
 						[value: 0, color: "#bc2323"],
 						[value: 1000, color: "#1e9cbb"],
@@ -265,7 +265,7 @@ metadata {
 			whitelist: ["www.gstatic.com"])
 
 		main "power"
-		details(["SolarMulti", "graphHTML", "today", "energy_str", "efficiency", "yesterday", "energy_yesterday", "efficiency_yesterday", "last7days", "energy_last7days", "efficiency_last7days", "lifetime", "energy_life", "efficiency_lifetime", "installationDate", "refresh"])
+		details(["SolarMulti", /*"graphHTML",*/ "today", "energy_str", "efficiency", "yesterday", "energy_yesterday", "efficiency_yesterday", "last7days", "energy_last7days", "efficiency_last7days", "lifetime", "energy_life", "efficiency_lifetime", "installationDate", "refresh"])
 	}
 }
 
@@ -285,7 +285,6 @@ def updated() {
 	if (!state.updatedLastRanAt || now() >= state.updatedLastRanAt + 2000) {
 		state.updatedLastRanAt = now()
 		log.trace("$device.displayName - updated() called with settings: ${settings.inspect()}")
-		state.remove('api')
 		state.remove('installationDate')
 		state.maxPower = settings.confNumInverters * settings.confInverterSize
 		// Notify health check about this device with timeout interval equal to 5 failed update requests
@@ -343,19 +342,18 @@ def pullData() {
 		log.debug "${device.displayName} - requesting installation date from Envoy…"
 		sendHubCommand(new physicalgraph.device.HubAction([
 				method: "GET",
-				path: "/production?locale=en",
+				path: "/inventory.json",
 				headers: [HOST:getHostAddress()]
 			],
 			state.dni,
 			[callback: installationDateCallback])
 		)
 	} else {
-		state.lastRequestType = (state.api == "HTML" ? "HTML" : "JSON API")
-		log.debug "${device.displayName} - requesting latest data from Envoy via ${state.lastRequestType}…"
+		log.debug "${device.displayName} - requesting latest data from Envoy…"
 		updateDNI()
 		sendHubCommand(new physicalgraph.device.HubAction([
 				method: "GET",
-				path: state.lastRequestType == "HTML" ? "/production?locale=en" : "/api/v1/production",
+				path: "/production.json",
 				headers: [HOST:getHostAddress()]
 			],
 			state.dni,
@@ -408,38 +406,29 @@ private Integer retrieveProductionValue(String body, String heading) {
 	return null
 }
 
-private Map parseHTMLProductionData(String body) {
-	def data = [:]
-	data.wattHoursToday = retrieveProductionValue(body, "Today")
-	data.wattHoursSevenDays = retrieveProductionValue(body, "Past Week")
-	data.wattHoursLifetime = retrieveProductionValue(body, "Since Installation")
-	data.wattsNow = retrieveProductionValue(body, "Currently")
-	return data
-}
-
 def installationDateCallback(physicalgraph.device.HubResponse msg) {
 	if (!state.mac || state.mac != msg.mac) {
 		state.mac = msg.mac
 	}
-	if (!state.installationDate && !msg.json && msg.body) {
+	if (state.installationDate < 0 && msg.json) {
 		log.debug "${device.displayName} - trying to determine system installation date…"
-		def patternString = "(?ms).*?System has been live since.*?>(.*?)<.*"
-		if (msg.body ==~ /${patternString}/) {
-			msg.body.replaceFirst(/${patternString}/) {all, dateString ->
-				try {
-					state.installationDate = new Date().parse("E MMM dd, yyyy H:m a z", dateString).getTime()
-					log.debug "${device.displayName} - system has been live since ${dateString}"
-					sendEvent(name: 'installationDate', value: "System live since " + new Date(state.installationDate).format("MMM dd, yyyy"), displayed: false)
-				}
-				catch (Exception ex) {
-					log.debug "${device.displayName} - unable to parse installation date '${dateString}' ('${ex}')"
-					state.installationDate = -1
-				}
+
+		def pcuNode = msg.json.find { it.type == 'PCU' }
+
+		pcuNode.devices.each {
+			if (it.installed.isInteger()) {
+				long installed = it.installed.toLong() * 1000L // seconds to milliseconds
+				if (state.installationDate < 0 || installed < state.installationDate)
+					state.installationDate = installed
 			}
 		}
-		else {
+
+		if (state.installationDate < 0)
 			log.debug "${device.displayName} - unable to find installation date on page"
-			state.installationDate = -1
+		else {
+			def dateString = new Date(state.installationDate).format("MMM dd, yyyy")
+			log.debug "${device.displayName} - system has been live since ${dateString}"
+			sendEvent(name: 'installationDate', value: "System live since " + dateString, displayed: false)
 		}
 	}
 	pullData()
@@ -449,27 +438,22 @@ def dataCallback(physicalgraph.device.HubResponse msg) {
 	if (!state.mac || state.mac != msg.mac) {
 		state.mac = msg.mac
 	}
-	if (!state.api && state.lastRequestType != "HTML" && (msg.status != 200 || !msg.json)) {
-		log.debug "${device.displayName} - JSON API not available, falling back to HTML interface (Envoy responded with status code ${msg.status})"
-		state.api = "HTML"
-		return
-	}
-	else if (!msg.body) {
+	if (!msg.body) {
 		log.error "${device.displayName} - no HTTP body found in '${message}'"
 		return
 	}
-	def data = state.api == "HTML" ? parseHTMLProductionData(msg.body) : msg.json
-	if (state.lastData && (data.wattHoursToday == state.lastData.wattHoursToday) && (data.wattsNow == state.lastData.wattsNow)) {
+	def data = msg.json.production.find { it."measurementType" == 'production' }
+	if (state.lastData && (data.whToday == state.lastData.whToday) && (data.wNow == state.lastData.wNow)) {
 		log.debug "${device.displayName} - no new data"
 		sendEvent(name: 'lastUpdate', value: new Date(), displayed: false) // dummy event for health check
 		return
 	}
 	state.lastData = data
 	log.debug "${device.displayName} - new data: ${data}"
-	def energyToday = (data.wattHoursToday/1000).toFloat()
-	def energyLast7Days = (data.wattHoursSevenDays/1000).toFloat()
-	def energyLife = (data.wattHoursLifetime/1000000).toFloat()
-	def currentPower = data.wattsNow
+	def energyToday = data.whToday.toFloat() / 1000.0f
+	def energyLast7Days = data.whLastSevenDays.toFloat() / 1000.0f
+	def energyLife = data.whLifetime.toFloat() / 1000000.0f
+	def currentPower = data.wNow.toInteger()
 	def todayDay = new Date().format("dd",location.timeZone)
 	def powerTable = state.powerTable
 	def energyTable = state.energyTable
